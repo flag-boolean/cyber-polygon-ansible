@@ -1,0 +1,119 @@
+---
+- name: Создание одной лаборатории в OpenNebula
+  hosts: opennebula_frontend
+  gather_facts: false
+
+  vars_files:
+    - secrets.yml
+    - vars/labs.yml
+
+  vars:
+    one_api_url: "http://127.0.0.1:2633/RPC2"
+    one_api_username: "oneadmin"
+    one_api_password: "{{ one_api_password }}"
+
+    selected_labs: >-
+      {{ labs | selectattr('name', 'equalto', lab_name | default('__undefined__')) | list }}
+
+    selected_vms: >-
+      {{ selected_labs[0].vms if selected_labs | length > 0 else [] }}
+
+  tasks:
+    # ============================================================
+    # ЭТАП 0: Валидация
+    # ============================================================
+    - name: Проверить, что lab_name передан и существует
+      ansible.builtin.fail:
+        msg: >-
+          Укажите существующую лабораторию через -e "lab_name=<имя>".
+          Доступные: {{ labs | map(attribute='name') | join(', ') }}
+      when: selected_labs | length == 0
+
+    - name: Лаборатория к созданию
+      ansible.builtin.debug:
+        msg: >-
+          Лаборатория {{ selected_labs[0].name }}:
+          сеть {{ selected_labs[0].network }},
+          ролей: {{ selected_vms | length }},
+          всего ВМ: {{ selected_vms | map(attribute='count') | sum }}
+
+    # ============================================================
+    # ЭТАП 1: Проверить наличие шаблонов
+    # ============================================================
+    - name: Проверить наличие всех шаблонов, используемых лабораторией
+      ansible.builtin.shell: |
+        onetemplate list --csv | awk -F, '{print $2}' | grep -qx "{{ item.template }}" \
+          && echo "exists" || echo "missing"
+      loop: "{{ selected_vms }}"
+      loop_control:
+        label: "{{ item.role }} -> {{ item.template }}"
+      register: template_checks
+      changed_when: false
+
+    - name: Отчёт по шаблонам
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.role }} -> {{ item.item.template }}:
+          {{ 'найден' if item.stdout == 'exists' else 'НЕ НАЙДЕН!' }}
+      loop: "{{ template_checks.results }}"
+      loop_control:
+        label: "{{ item.item.role }}"
+
+    # ============================================================
+    # ЭТАП 2: Создать сеть лаборатории
+    # ============================================================
+    - name: Создать VXLAN-сеть лаборатории "{{ selected_labs[0].name }}"
+      ansible.builtin.shell: |
+        cat > /tmp/{{ selected_labs[0].network }}.conf << 'EOF'
+        NAME = "{{ selected_labs[0].network }}"
+        VN_MAD = "vxlan"
+        PHYDEV = "br0"
+        BRIDGE = "onebr"
+        VLAN_ID = "{{ selected_labs[0].vxlan_id }}"
+        DESCRIPTION = "Изолированная сеть для {{ selected_labs[0].name }}"
+        AR=[ TYPE = "IP4", IP = {{ selected_labs[0].subnet | regex_replace('\\.0/24$', '.10') }}, SIZE = "100" ]
+        EOF
+        if ! onevnet list --csv | grep -q "{{ selected_labs[0].network }}"; then
+          onevnet create /tmp/{{ selected_labs[0].network }}.conf
+        fi
+        rm -f /tmp/{{ selected_labs[0].network }}.conf
+      register: network_result
+      changed_when: network_result.stdout is search("ID:")
+
+    # ============================================================
+    # ЭТАП 3: Создать VM по ролям
+    # ============================================================
+    - name: Создать ВМ роли "{{ item.role }}"
+      ansible.builtin.shell: |
+        for i in $(seq 1 {{ item.count }}); do
+          VM_NAME="{{ selected_labs[0].name }}-{{ item.role }}-$(printf '%03d' $((i-1)))"
+
+          RAW_ARGS=""
+          {% if item.memory is defined %}
+          RAW_ARGS="$RAW_ARGS --raw 'MEMORY = {{ item.memory }}'"
+          {% endif %}
+          {% if item.cpu is defined %}
+          RAW_ARGS="$RAW_ARGS --raw 'CPU = {{ item.cpu }}'"
+          {% endif %}
+
+          eval onetemplate instantiate "{{ item.template }}" \
+            --name "\"$VM_NAME\"" \
+            --raw "\"NIC = [ NETWORK = \\\"{{ selected_labs[0].network }}\\\", NETWORK_UNAME = \\\"oneadmin\\\" ]\"" \
+            --raw "\"LABELS = \\\"{{ selected_labs[0].name }}\\\"\"" \
+            $RAW_ARGS
+        done
+      loop: "{{ selected_vms }}"
+      loop_control:
+        label: "{{ item.role }} ({{ item.count }} ВМ, шаблон {{ item.template }})"
+      register: vm_create_result
+      changed_when: vm_create_result.stdout is search("VM ID")
+
+    # ============================================================
+    # ЭТАП 4: Итог
+    # ============================================================
+    - name: Итог создания лаборатории
+      ansible.builtin.debug:
+        msg: >-
+          Лаборатория {{ selected_labs[0].name }} создана.
+          Сеть: {{ selected_labs[0].network }}.
+          ВМ: {{ selected_vms | map(attribute='count') | sum }}.
