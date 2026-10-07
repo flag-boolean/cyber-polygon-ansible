@@ -1,0 +1,106 @@
+---
+- name: Создание всех лабораторий из vars/labs.yml
+  hosts: opennebula_frontend
+  gather_facts: false
+
+  vars_files:
+    - secrets.yml
+    - vars/labs.yml
+
+  vars:
+    one_api_url: "http://127.0.0.1:2633/RPC2"
+    one_api_username: "oneadmin"
+    one_api_password: "{{ one_api_password }}"
+    vm_template_name: "debian-12-template"
+
+  tasks:
+    # ============================================================
+    # ЭТАП 1: Управление базовым шаблоном VM (идемпотентно)
+    # ============================================================
+    - name: Управлять шаблоном VM "{{ vm_template_name }}"
+      community.general.one_template:
+        api_url: "{{ one_api_url }}"
+        api_username: "{{ one_api_username }}"
+        api_password: "{{ one_api_password }}"
+        name: "{{ vm_template_name }}"
+        state: present
+        template: |
+          MEMORY = 512
+          CPU = 1
+          VCPU = 1
+          DISK = [ TYPE = "fs", SIZE = 1024, FORMAT = "ext3" ]
+          GRAPHICS = [ TYPE = "vnc", LISTEN = "0.0.0.0" ]
+          OS = [ ARCH = "x86_64" ]
+      register: template_result
+
+    - name: Информация о шаблоне
+      ansible.builtin.debug:
+        msg: >-
+          Шаблон {{ vm_template_name }}:
+          {{ 'создан' if template_result.changed else 'уже существует' }}
+
+    # ============================================================
+    # ЭТАП 2: Создание VXLAN-сетей с пулами IP
+    # ============================================================
+    - name: Создать VXLAN-сети для лабораторий
+      ansible.builtin.shell: |
+        cat > /tmp/{{ item.network }}.conf << 'EOF'
+        NAME = "{{ item.network }}"
+        VN_MAD = "vxlan"
+        PHYDEV = "br0"
+        BRIDGE = "onebr"
+        VLAN_ID = "{{ item.vxlan_id }}"
+        DESCRIPTION = "Изолированная сеть для {{ item.name }}"
+        AR=[ TYPE = "IP4", IP = {{ item.subnet | regex_replace('\\.0/24$', '.10') }}, SIZE = "100" ]
+        EOF
+        if ! onevnet list --csv | grep -q "{{ item.network }}"; then
+          onevnet create /tmp/{{ item.network }}.conf
+        fi
+        rm -f /tmp/{{ item.network }}.conf
+      loop: "{{ labs }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.network }})"
+      register: network_result
+      changed_when: network_result.stdout is search("ID:")
+
+    # ============================================================
+    # ЭТАП 3: Создание VM каждой лаборатории по ролям
+    # ============================================================
+    - name: Создать VM всех лабораторий
+      ansible.builtin.shell: |
+        for i in $(seq 1 {{ vm.count }}); do
+          VM_NAME="{{ lab.name }}-{{ vm.role }}-$(printf '%03d' $((i-1)))"
+
+          RAW_ARGS=""
+          {% if vm.memory is defined %}
+          RAW_ARGS="$RAW_ARGS --raw 'MEMORY = {{ vm.memory }}'"
+          {% endif %}
+          {% if vm.cpu is defined %}
+          RAW_ARGS="$RAW_ARGS --raw 'CPU = {{ vm.cpu }}'"
+          {% endif %}
+
+          eval onetemplate instantiate "{{ vm.template }}" \
+            --name "\"$VM_NAME\"" \
+            --raw "\"NIC = [ NETWORK = \\\"{{ lab.network }}\\\", NETWORK_UNAME = \\\"oneadmin\\\" ]\"" \
+            --raw "\"LABELS = \\\"{{ lab.name }}\\\"\"" \
+            $RAW_ARGS
+        done
+      loop: "{{ labs | subelements('vms') }}"
+      loop_control:
+        loop_var: lab_vm
+        label: "{{ lab_vm.0.name }} / {{ lab_vm.1.role }}"
+      register: vm_create_result
+      changed_when: vm_create_result.stdout is search("VM ID")
+
+    # ============================================================
+    # ЭТАП 4: Итог
+    # ============================================================
+    - name: Итог создания лабораторий
+      ansible.builtin.debug:
+        msg: >-
+          Лаборатория {{ item.name }}: сеть {{ item.network }},
+          ролей: {{ item.vms | length }},
+          всего ВМ: {{ item.vms | map(attribute='count') | sum }}
+      loop: "{{ labs }}"
+      loop_control:
+        label: "{{ item.name }}"
