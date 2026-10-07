@@ -1,0 +1,17 @@
+# 1. Создать Vault с паролем OpenNebula
+ansible-vault create secrets.yml
+# Внутри: one_api_password: "пароль"
+
+# 2. Проверить inventory.ini (IP хоста B, путь к SSH-ключу)
+
+# 3. Создать одну лабораторию для теста
+ansible-playbook -i inventory.ini create_lab.yml \
+  -e "lab_name=goad-lab1" --ask-vault-pass
+
+# 4. Пересоздать её (destroy + create)
+ansible-playbook -i inventory.ini recreate_lab.yml \
+  -e "lab_name=goad-lab1" --ask-vault-pass
+
+# 5. Удалить всё
+ansible-playbook -i inventory.ini destroy_lab.yml \
+  -e "lab_name=all" --ask-vault-pass
