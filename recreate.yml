@@ -1,0 +1,15 @@
+---
+# Пересоздание одной лаборатории: destroy + create.
+#
+# Использование:
+#   ansible-playbook -i inventory.ini recreate_lab.yml \
+#     -e "lab_name=goad-lab1" --ask-vault-pass
+#
+# Если лаборатории ещё нет — destroy ничего не сделает,
+# create создаст её с нуля.
+
+- name: "Пересоздание — ЭТАП 1/2: удаление"
+  import_playbook: destroy_lab.yml
+
+- name: "Пересоздание — ЭТАП 2/2: создание"
+  import_playbook: create_lab.yml
