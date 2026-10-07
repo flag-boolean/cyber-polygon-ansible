@@ -1,0 +1,46 @@
+---
+# Описание всех лабораторий.
+# Каждая лаборатория = изолированная VXLAN-сеть + набор VM с ролями.
+
+labs:
+  - name: "goad-lab1"
+    network: "goad-lab1-net"
+    vxlan_id: 1001
+    subnet: "10.1.1.0/24"
+    vms:
+      - role: "dc"
+        template: "debian-12-template"
+        count: 1
+        memory: 2048
+        cpu: 2
+      - role: "srv"
+        template: "debian-12-template"
+        count: 2
+        memory: 2048
+        cpu: 2
+      - role: "ws"
+        template: "debian-12-template"
+        count: 2
+        memory: 1024
+        cpu: 1
+
+  - name: "goad-lab2"
+    network: "goad-lab2-net"
+    vxlan_id: 1002
+    subnet: "10.1.2.0/24"
+    vms:
+      - role: "dc"
+        template: "debian-12-template"
+        count: 1
+      - role: "srv"
+        template: "debian-12-template"
+        count: 1
+
+  - name: "goad-lab3"
+    network: "goad-lab3-net"
+    vxlan_id: 1003
+    subnet: "10.1.3.0/24"
+    vms:
+      - role: "dc"
+        template: "debian-12-template"
+        count: 1
