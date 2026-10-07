@@ -1,0 +1,120 @@
+---
+- name: Удаление лаборатории(й) из OpenNebula
+  hosts: opennebula_frontend
+  gather_facts: false
+
+  vars_files:
+    - secrets.yml
+    - vars/labs.yml
+
+  vars:
+    one_api_url: "http://127.0.0.1:2633/RPC2"
+    one_api_username: "oneadmin"
+    one_api_password: "{{ one_api_password }}"
+
+    lab_name: "{{ lab_name | default('all') }}"
+
+    labs_to_destroy: >-
+      {{
+        labs if lab_name == 'all'
+        else (labs | selectattr('name', 'equalto', lab_name) | list)
+      }}
+
+  tasks:
+    # ============================================================
+    # ЭТАП 0: Валидация
+    # ============================================================
+    - name: Показать режим работы
+      ansible.builtin.debug:
+        msg: >-
+          Режим удаления:
+          {{ 'ВСЕ лаборатории (' + (labs | length | string) + ' шт.)'
+             if lab_name == 'all'
+             else 'лаборатория ' + lab_name }}
+
+    - name: Проверить, что указанная лаборатория существует в списке
+      ansible.builtin.fail:
+        msg: >-
+          Лаборатория "{{ lab_name }}" не найдена.
+          Доступные: {{ labs | map(attribute='name') | join(', ') }}
+      when: labs_to_destroy | length == 0
+
+    - name: Список лабораторий к удалению
+      ansible.builtin.debug:
+        msg: "Будут удалены: {{ labs_to_destroy | map(attribute='name') | join(', ') }}"
+
+    # ============================================================
+    # ЭТАП 1: Собрать список ВМ по ИМЕНИ (не по метке!)
+    # ============================================================
+    - name: Собрать список ВМ каждой лаборатории (до удаления)
+      ansible.builtin.shell: |
+        onevm list --csv | awk -F, -v lab="{{ lab.name }}" '$4 ~ ("^" lab "-") {print $1}'
+      loop: "{{ labs_to_destroy }}"
+      loop_control:
+        loop_var: lab
+        label: "{{ lab.name }}"
+      register: vms_before
+      changed_when: false
+
+    - name: Сводка по найденным ВМ
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.lab.name }}: найдено ВМ —
+          {{ item.stdout_lines | length }}
+          (IDs: {{ item.stdout_lines | join(', ') if item.stdout_lines | length > 0 else 'нет' }})
+      loop: "{{ vms_before.results }}"
+      loop_control:
+        label: "{{ item.lab.name }}"
+
+    # ============================================================
+    # ЭТАП 2: Удалить ВМ и сети
+    # ============================================================
+    - name: Удалить ВМ и сети лаборатории "{{ lab.name }}"
+      ansible.builtin.shell: |
+        set -e
+        LAB_NAME="{{ lab.name }}"
+        NET_NAME="{{ lab.network }}"
+
+        VM_IDS=$(onevm list --csv | awk -F, -v lab="$LAB_NAME" '$4 ~ ("^" lab "-") {print $1}')
+        for vm_id in $VM_IDS; do
+          if [ -n "$vm_id" ]; then
+            echo "Удаляю ВМ ID=$vm_id"
+            onevm terminate --hard "$vm_id" || true
+          fi
+        done
+
+        if onevnet list --csv | grep -q ",$NET_NAME,"; then
+          echo "Удаляю сеть $NET_NAME"
+          onevnet delete "$NET_NAME" || true
+        else
+          echo "Сеть $NET_NAME не найдена"
+        fi
+      loop: "{{ labs_to_destroy }}"
+      loop_control:
+        loop_var: lab
+        label: "{{ lab.name }} ({{ lab.network }})"
+      register: destroy_results
+
+    - name: Что было удалено
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ destroy_results.results }}"
+      loop_control:
+        label: "{{ item.lab.name }}"
+
+    # ============================================================
+    # ЭТАП 3: Финальная проверка
+    # ============================================================
+    - name: Проверить, что не осталось ВМ удалённых лабораторий
+      ansible.builtin.shell: |
+        for lab in {{ labs_to_destroy | map(attribute='name') | join(' ') }}; do
+          vm_count=$(onevm list --csv | awk -F, -v lab="$lab" '$4 ~ ("^" lab "-")' | wc -l)
+          net_count=$(onevnet list --csv | grep -c ",$lab-net," || true)
+          echo "$lab: ВМ=$vm_count, сеть=$net_count"
+        done
+      register: remaining
+      changed_when: false
+
+    - name: Итог удаления
+      ansible.builtin.debug:
+        msg: "{{ remaining.stdout_lines }}"
